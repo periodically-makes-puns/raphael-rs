@@ -67,7 +67,11 @@ impl SimulationState {
     }
 
     pub fn get_missing_quality(&self) -> u16 {
-        std::cmp::max(self.unreliable_quality[0], self.unreliable_quality[1])
+        self.unreliable_quality[1]
+    }
+
+    pub fn get_qual_delta(&self) -> u16 {
+        self.unreliable_quality[1] - self.unreliable_quality[0]
     }
 }
 

@@ -16,7 +16,7 @@ pub struct UpperBoundSolver {
     settings: Settings,
     base_durability_cost: i16,
     waste_not_cost: i16,
-    solved_states: HashMap<ReducedState, Box<[ParetoValue<u16, u16>]>>,
+    solved_states: HashMap<ReducedState, Vec<(u16, Box<[ParetoValue<u16, u16>]>)>>,
     pareto_front_builder: ParetoFrontBuilder<u16, u16>,
 }
 
@@ -73,11 +73,12 @@ impl UpperBoundSolver {
             self.waste_not_cost,
         );
 
-        if !self.solved_states.contains_key(&reduced_state) {
+        if !self.solved_states.contains_key(&reduced_state) ||
+            self.solved_states.get(&reduced_state).unwrap().last().unwrap().0 < reduced_state.qual_delta {
             self.solve_state(reduced_state);
             self.pareto_front_builder.clear();
         }
-        let pareto_front = self.solved_states.get(&reduced_state).unwrap();
+        let pareto_front = self.get_state(&reduced_state).unwrap();
 
         match pareto_front.first() {
             Some(first_element) => {
@@ -105,6 +106,19 @@ impl UpperBoundSolver {
         )
     }
 
+    fn get_state(&self, state: &ReducedState) -> Option<&[ParetoValue<u16, u16>]> {
+        if let Some(pareto_fronts) = self.solved_states.get(state) {
+            let index = match pareto_fronts.binary_search_by(|elem| {
+                elem.0.cmp(&state.qual_delta)
+            }) { Ok(x) => x, Err(x) => x };
+            if index == pareto_fronts.len() {
+                None 
+            } else {            
+                Some(pareto_fronts[index].1.as_ref())
+            }
+        } else { None }
+    }
+
     fn solve_state(&mut self, state: ReducedState) {
         self.pareto_front_builder.push_empty();
         for action in SEARCH_ACTIONS
@@ -120,7 +134,7 @@ impl UpperBoundSolver {
             }
         }
         let pareto_front = self.pareto_front_builder.peek().unwrap();
-        self.solved_states.insert(state, pareto_front);
+        self.solved_states.entry(state).or_default().push((state.qual_delta, pareto_front));
     }
 
     fn build_child_front(&mut self, state: ReducedState, action: Action) {
@@ -136,7 +150,13 @@ impl UpperBoundSolver {
                     self.waste_not_cost,
                 );
                 if new_state.cp > 0 {
-                    match self.solved_states.get(&new_state) {
+                    match self.solved_states.get(&new_state).map(|pareto_fronts| {
+                        pareto_fronts[match pareto_fronts.binary_search_by(|elem| {
+                            elem.0.cmp(&new_state.qual_delta)
+                        }) { Ok(x) => x, Err(x) => x}].1.as_ref()
+                    }) { // I would've loved to use get_state here, but the borrow checker doesn't like it.
+                    // get_state borrows self as immut, which prevents the mut borrow here.
+                    // TODO: more idiomatic way later?
                         Some(pareto_front) => self.pareto_front_builder.push(pareto_front),
                         None => self.solve_state(new_state),
                     }
@@ -230,7 +250,7 @@ mod tests {
                 Action::PreparatoryTouch,
             ],
         );
-        assert_eq!(result, 3375);
+        assert_eq!(result, 3047);
     }
 
     #[test]
@@ -286,7 +306,7 @@ mod tests {
                 Action::Groundwork,
             ],
         );
-        assert_eq!(result, 4767);
+        assert_eq!(result, 4043);
     }
 
     #[test]
@@ -352,7 +372,7 @@ mod tests {
                 Action::ComboStandardTouch,
             ],
         );
-        assert_eq!(result, 3953);
+        assert_eq!(result, 3455);
     }
 
     #[test]
@@ -388,7 +408,7 @@ mod tests {
             adversarial: true,
         };
         let result = solve(settings, &[Action::MuscleMemory]);
-        assert_eq!(result, 2220);
+        assert_eq!(result, 2029);
     }
 
     #[test]
@@ -460,7 +480,7 @@ mod tests {
             adversarial: true,
         };
         let result = solve(settings, &[Action::MuscleMemory]);
-        assert_eq!(result, 4555);
+        assert_eq!(result, 3883);
     }
 
     #[test]
@@ -586,7 +606,7 @@ mod tests {
             })
     }
 
-    fn random_state(settings: &Settings) -> InProgress {
+    fn random_state(settings: &Settings) -> SimulationState {
         SimulationState {
             cp: rand::thread_rng().gen_range(0..=settings.max_cp),
             durability: rand::thread_rng().gen_range(1..=(settings.max_durability / 5)) * 5,
@@ -595,8 +615,6 @@ mod tests {
             effects: random_effects(settings.adversarial),
             combo: None, // TODO: random combo
         }
-        .try_into()
-        .unwrap()
     }
 
     /// Test that the upper-bound solver is monotonic,
@@ -604,7 +622,7 @@ mod tests {
     fn monotonic_fuzz_check(settings: Settings) {
         let mut solver = UpperBoundSolver::new(settings);
         for _ in 0..10000 {
-            let state = random_state(&settings);
+            let state = random_state(&settings).try_into().unwrap();
             let state_upper_bound = solver.quality_upper_bound(state);
             for action in settings.allowed_actions.actions_iter() {
                 let child_upper_bound = match state.use_action(action, Condition::Normal, &settings)
@@ -658,5 +676,36 @@ mod tests {
             adversarial: true,
         };
         monotonic_fuzz_check(settings);
+    }
+    
+    fn qual_delta_increasing(settings: Settings) {
+        let mut solver = UpperBoundSolver::new(settings);
+        let mut prev = 0;
+        let mut state = random_state(&settings);
+        for _ in 0..1000 {
+            let res = solver.quality_upper_bound(state.try_into().unwrap());
+            assert!(res >= prev, "not monotonic: current = {res}\nprev = {prev}\nstate = {state:?}");
+            prev = res;
+            state.unreliable_quality[0] -= 1;
+        }
+    }
+
+    #[test]
+    fn test_monotonic_qual_adversarial() {
+        let settings = Settings {
+            max_cp: 360,
+            max_durability: 70,
+            max_progress: 1000,
+            max_quality: 20000,
+            base_progress: 100,
+            base_quality: 100,
+            initial_quality: 0,
+            job_level: 100,
+            allowed_actions: ActionMask::from_level(100, true, false),
+            adversarial: true,
+        };
+        for _ in 0..100 {
+            qual_delta_increasing(settings);
+        }
     }
 }

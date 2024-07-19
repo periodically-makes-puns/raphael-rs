@@ -1,4 +1,5 @@
 use simulator::{state::InProgress, ComboAction, Effects, SimulationState, SingleUse};
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReducedEffects {
@@ -8,13 +9,24 @@ pub struct ReducedEffects {
     pub great_strides: u8,
     pub muscle_memory: u8,
     pub trained_perfection: SingleUse,
+    pub guard: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReducedState {
     pub cp: i16,
+    pub qual_delta: u16,
+    // missing_quality[1] is always larger than missing_quality[0]
     pub combo: Option<ComboAction>,
     pub effects: ReducedEffects,
+}
+
+impl Hash for ReducedState {
+    fn hash<H: Hasher>(&self, st: &mut H) {
+        self.cp.hash(st);
+        self.combo.hash(st);
+        self.effects.hash(st);
+    } // Exclude quality delta when hashing.
 }
 
 impl ReducedState {
@@ -28,6 +40,7 @@ impl ReducedState {
         Self {
             cp: state.cp - durability_cost,
             combo: state.combo,
+            qual_delta: state.unreliable_quality[1] - state.unreliable_quality[0],
             effects: ReducedEffects {
                 inner_quiet: state.effects.inner_quiet(),
                 innovation: state.effects.innovation(),
@@ -35,6 +48,7 @@ impl ReducedState {
                 great_strides: state.effects.great_strides(),
                 muscle_memory: state.effects.muscle_memory(),
                 trained_perfection: state.effects.trained_perfection(),
+                guard: state.effects.guard(),
             },
         }
     }
@@ -46,7 +60,7 @@ impl std::convert::From<ReducedState> for InProgress {
             durability: i8::MAX,
             cp: state.cp,
             missing_progress: u16::MAX,
-            unreliable_quality: [u16::MAX, u16::MAX],
+            unreliable_quality: [u16::MAX.saturating_sub(state.qual_delta), u16::MAX],
             effects: Effects::new()
                 .with_inner_quiet(state.effects.inner_quiet)
                 .with_innovation(state.effects.innovation)
@@ -54,7 +68,7 @@ impl std::convert::From<ReducedState> for InProgress {
                 .with_great_strides(state.effects.great_strides)
                 .with_muscle_memory(state.effects.muscle_memory)
                 .with_trained_perfection(state.effects.trained_perfection)
-                .with_guard(1),
+                .with_guard(state.effects.guard),
             combo: state.combo,
         }
         .try_into()
